@@ -104,6 +104,7 @@ svg.ring{display:block;width:190px;height:190px;margin:6px auto 0}
       <option value="REB">Rebounds</option>
       <option value="AST">Assists</option>
       <option value="FG3M">Threes made</option>
+      <option value="FG3A">Three-point attempts</option>
       <option value="PRA">Pts + Reb + Ast</option>
       <option value="PR">Pts + Reb</option>
       <option value="PA">Pts + Ast</option>
@@ -149,7 +150,7 @@ svg.ring{display:block;width:190px;height:190px;margin:6px auto 0}
       <div class="teamhead">Teams (tap to select, none = all)<button id="clearTeams" type="button">Clear</button></div>
       <div id="teams" class="teams"></div>
     </div>
-    <label class="check wide"><input id="dropShort" type="checkbox" checked>Ignore games under 20 minutes</label>
+    <label class="check wide"><input id="dropShort" type="checkbox" checked>Ignore short games (under 60% of his usual minutes)</label>
     <div class="wide" style="display:flex;gap:8px;flex-wrap:wrap">
       <label class="filebtn">Load a new CSV<input class="fileinput" type="file" accept=".csv,text/csv,text/plain"></label>
     </div>
@@ -240,16 +241,20 @@ function build(rows){
     if(!map.has(id)) map.set(id, {id, name:r.PLAYER_NAME, team:"", pos:(r.POSITION || "").trim(), lastDate:"", games:[]});
     const p = map.get(id);
     const n = k => parseFloat(r[k]) || 0;
-    const g = {date:r.GAME_DATE||"", min:n("MIN"), PTS:n("PTS"), REB:n("REB"), AST:n("AST"), FG3M:n("FG3M")};
+    const g = {date:r.GAME_DATE||"", min:n("MIN"), PTS:n("PTS"), REB:n("REB"), AST:n("AST"), FG3M:n("FG3M"), FG3A:n("FG3A")};
     g.MIN = g.min; g.PRA = g.PTS + g.REB + g.AST; g.PR = g.PTS + g.REB; g.PA = g.PTS + g.AST; g.RA = g.REB + g.AST;
     p.games.push(g);
     if(g.date >= p.lastDate){ p.lastDate = g.date; p.team = r.TEAM_ABBREVIATION || p.team; }
   }
   return [...map.values()].map(p => {
     p.games.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+    p.games = p.games.filter(g => g.min > 0);   /* did-not-play rows are not games */
+    if(!p.games.length) return null;
     p.avgMin = p.games.reduce((s,g) => s + g.min, 0) / p.games.length;
+    const ms = p.games.map(g => g.min).sort((a, b) => a - b), mid = Math.floor(ms.length / 2);
+    p.usualMin = ms.length % 2 ? ms[mid] : (ms[mid - 1] + ms[mid]) / 2;
     return p;
-  });
+  }).filter(Boolean);
 }
 
 function quant(sorted, q){
@@ -281,7 +286,7 @@ function compute(){
     if(p.avgMin < minMin || p.avgMin > maxMin) continue;
     if(teams.size && !teams.has(p.team)) continue;
     if(term && !p.name.toLowerCase().includes(term) && p.team.toLowerCase() !== term) continue;
-    const games = drop ? p.games.filter(g => g.min >= 20) : p.games;
+    const games = drop ? p.games.filter(g => g.min >= 0.6 * p.usualMin) : p.games;
     if(games.length < minGames) continue;
     const tot = games.reduce((s,g) => s + g.min, 0);
     if(tot < minTot || tot <= 0) continue;
@@ -403,16 +408,36 @@ function ladder(r){
   return `<div class="ladder"><table>${rows}</table></div>`;
 }
 
+/* ---------- three-point volume check ---------- */
+function volumeLine(p){
+  const g = p.games, last = g.slice(-5), a = last.map(x => x.FG3A), m = last.reduce((s, x) => s + x.FG3M, 0), at = a.reduce((s, x) => s + x, 0);
+  const ma = g.reduce((s, x) => s + x.FG3M, 0), aa = g.reduce((s, x) => s + x.FG3A, 0);
+  const low = Math.min(...a), avgA = aa / g.length;
+  return `<div class="trend" style="font-size:13.5px">3PA last ${last.length}: ${a.join(", ")}${low < avgA * 0.7 ? ` <span class="tag eff">low-volume game in there</span>` : ""}<br>
+    3P% last ${last.length}: ${at ? Math.round(m / at * 100) : 0}% · season ${aa ? Math.round(ma / aa * 100) : 0}% on ${fmt(avgA)} attempts a game</div>`;
+}
+
 /* ---------- scan ---------- */
-const SCAN_STATS = {PTS:["Points",5],REB:["Rebounds",2],AST:["Assists",1.5],FG3M:["Threes",0.8],PRA:["PRA",8],PR:["Pts+Reb",6],PA:["Pts+Ast",6],RA:["Reb+Ast",3],MIN:["Minutes",10]};
+const SCAN_STATS = {PTS:["Points",5],REB:["Rebounds",2],AST:["Assists",1.5],FG3M:["Threes",0.8],FG3A:["3PA",3],PRA:["PRA",8],PR:["Pts+Reb",6],PA:["Pts+Ast",6],RA:["Reb+Ast",3],MIN:["Minutes",10]};
 const mean = a => a.reduce((s, v) => s + v, 0) / a.length;
 function fit(v){ /* least squares slope and R^2 for points 0..n-1 */
   const n = v.length, xm = (n - 1) / 2, ym = mean(v); let sxy = 0, sxx = 0, syy = 0;
   v.forEach((y, i) => { sxy += (i - xm) * (y - ym); sxx += (i - xm) ** 2; syy += (y - ym) ** 2; });
   const b = sxx ? sxy / sxx : 0; return {b, r2: syy ? (sxy * sxy) / (sxx * syy) : 0};
 }
+function threesTag(gBefore, gAfter){
+  const a0 = mean(gBefore.map(g => g.FG3A)), a1 = mean(gAfter.map(g => g.FG3A));
+  const p = gs => { const at = gs.reduce((s, g) => s + g.FG3A, 0); return at ? gs.reduce((s, g) => s + g.FG3M, 0) / at : 0; };
+  const up = a0 > 0 ? a1 / a0 - 1 : 0;
+  return up >= 0.15 ? `<span class="tag role">volume-driven, 3PA ${fmt(a0)}→${fmt(a1)}</span>`
+                    : `<span class="tag eff">shooting-driven, 3P% ${Math.round(p(gBefore) * 100)}%→${Math.round(p(gAfter) * 100)}%</span>`;
+}
 function roleTag(stat, before, after){
   if(stat === "MIN") return `<span class="tag mins">minutes</span>`;
+  if(stat === "FG3A"){
+    const up = before > 0 ? after / before - 1 : 0;
+    return up >= 0.15 ? `<span class="tag role">more minutes, ${fmt(before)}→${fmt(after)}</span>` : `<span class="tag role">bigger share of shots from three, same minutes</span>`;
+  }
   const up = before > 0 ? after / before - 1 : 0;
   return up >= 0.15 ? `<span class="tag role">role-driven, min ${fmt(before)}→${fmt(after)}</span>` : `<span class="tag eff">efficiency-driven, min ${fmt(before)}→${fmt(after)}</span>`;
 }
@@ -427,7 +452,7 @@ function renderScan(){
     if(teams.size && !teams.has(p.team)) continue;
     if(term && !p.name.toLowerCase().includes(term) && p.team.toLowerCase() !== term) continue;
     /* trend modes use every game so a bench player moving into the rotation isn't filtered out */
-    const games = trend ? p.games : (drop ? p.games.filter(g => g.min >= 20) : p.games);
+    const games = trend ? p.games : (drop ? p.games.filter(g => g.min >= 0.6 * p.usualMin) : p.games);
     const avgMin = mean(p.games.slice(-10).map(g => g.min));
     if(!trend && (p.avgMin < minMin || p.avgMin > maxMin)) continue;
     if(trend && avgMin < Math.min(minMin, 12)) continue;
@@ -442,12 +467,14 @@ function renderScan(){
     for(const [k, [label, minAvg]] of Object.entries(SCAN_STATS)){
       const v = games.map(g => g[k]), avg = mean(v);
       if(avg < minAvg) continue;
+      if((k === "FG3M" || k === "FG3A") && mean(games.map(g => g.FG3A)) < 3) continue;   /* skip bigs who take one three a night */
       if(mode === "rising"){
         const last = v.slice(-5); if(last.length < 5) continue;
         const {b, r2} = fit(last), rel = b / Math.max(avg, 1);
         if(rel < 0.08 || r2 < 0.7 || last[4] <= last[0] || last[4] < avg) continue;
         const mins = games.slice(-5).map(g => g.min);
-        res.push({p, k, label, score: rel * r2, text: `Rising: ${last.map(x => fmt(x)).join("→")}`, tag: roleTag(k, mins[0], mins[4])});
+        const tag = k === "FG3M" ? threesTag(games.slice(-10, -5).length ? games.slice(-10, -5) : games.slice(0, -5), games.slice(-5)) : roleTag(k, mins[0], mins[4]);
+        res.push({p, k, label, score: rel * r2, text: `Rising: ${last.map(x => fmt(x)).join("→")}`, tag});
       } else if(mode === "level"){
         let hit = null;
         for(const kk of [4, 3]){
@@ -456,7 +483,8 @@ function renderScan(){
           const sd = Math.sqrt(mean(prior.map(x => (x - pa) ** 2)));
           if(lastK.every(x => x >= pa * 1.25 && x >= pa + 0.5 * sd) && (Math.max(...lastK) - Math.min(...lastK)) <= 0.35 * m){
             const mb = mean(games.slice(0, -kk).map(g => g.min)), ma = mean(games.slice(-kk).map(g => g.min));
-            hit = {p, k, label, score: m / Math.max(pa, 0.5), text: `New level: ${fmt(pa)} before, last ${kk}: ${lastK.map(x => fmt(x)).join(", ")}`, tag: roleTag(k, mb, ma)}; break;
+            hit = {p, k, label, score: m / Math.max(pa, 0.5), text: `New level: ${fmt(pa)} before, last ${kk}: ${lastK.map(x => fmt(x)).join(", ")}`,
+                   tag: k === "FG3M" ? threesTag(games.slice(0, -kk), games.slice(-kk)) : roleTag(k, mb, ma)}; break;
           }
         }
         if(hit) res.push(hit);
@@ -504,6 +532,7 @@ function render(){
         <span class="duds">Duds<b>${r.duds}</b></span><span>Games<b>${r.n}</b></span>
         <span>Per min<b>${r.pm.toFixed(2)}</b></span>${r.proj !== null ? `<span>Proj @ ${fmt(projMin)} min<b>${fmt(r.proj)}</b></span>` : ""}${view === "curve" ? `<span>Shape<b>${shapeScore(r)}</b></span>` : ""}${view === "ring" ? `<span>Roundness<b>${roundness(r)}</b></span>` : ""}
       </div>
+      ${(stat === "FG3M" || stat === "FG3A") ? volumeLine(r.p) : ""}
       ${view === "curve" ? curve(r, line) : view === "ring" ? ring(r, line) : strip(r, line)}
       ${ladder(r)}
     </div>`;
