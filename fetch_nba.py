@@ -90,6 +90,16 @@ def get_players():
     return players
 
 
+def local_date(iso):
+    """ESPN gives UTC times; a 10:30 PM Eastern tip is already the next day in UTC.
+    Shifting back 6 hours gives the US calendar date for every NBA tip time."""
+    try:
+        t = datetime.datetime.strptime(iso[:16], "%Y-%m-%dT%H:%M")
+        return (t - datetime.timedelta(hours=6)).date().isoformat()
+    except Exception:
+        return iso[:10]
+
+
 def parse_log(pid, name, data, roster_team="", pos=""):
     labels = data.get("labels", [])
     meta = data.get("events", {})
@@ -100,6 +110,8 @@ def parse_log(pid, name, data, roster_team="", pos=""):
         for cat in st.get("categories", []):
             for ev in cat.get("events", []):
                 stats = dict(zip(labels, ev.get("stats", [])))
+                if not num(stats.get("MIN")):
+                    continue  # did not play
                 m = meta.get(str(ev.get("eventId")), {})
                 fgm, fga = split_made(stats.get("FG"))
                 tpm, tpa = split_made(stats.get("3PT"))
@@ -109,7 +121,7 @@ def parse_log(pid, name, data, roster_team="", pos=""):
                 rows.append({
                     "PLAYER_ID": pid, "PLAYER_NAME": name,
                     "TEAM_ABBREVIATION": team, "POSITION": pos, "GAME_ID": ev.get("eventId"),
-                    "GAME_DATE": (m.get("gameDate") or "")[:10],
+                    "GAME_DATE": local_date(m.get("gameDate") or ""),
                     "MATCHUP": f"{team} {m.get('atVs', '')} {opp}".strip(),
                     "WL": m.get("gameResult", ""),
                     "MIN": num(stats.get("MIN")), "FGM": fgm, "FGA": fga,
@@ -165,9 +177,21 @@ def main():
           f"{len({r['PLAYER_ID'] for r in all_rows})} players")
     print(f"File: {path}")
     if REPO_MODE:
+        try:   # tonight's matchups, so the screener can show each player's opponent defense
+            day = (datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(hours=8)).strftime("%Y%m%d")
+            sb = get(f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={day}")
+            games = []
+            for ev in (sb or {}).get("events", []):
+                tm = {c["homeAway"]: c["team"].get("abbreviation", "") for c in ev["competitions"][0]["competitors"]}
+                games.append({"home": tm.get("home", ""), "away": tm.get("away", ""), "start": ev.get("date")})
+            with open(os.path.join(out_dir, "today.json"), "w") as f:
+                json.dump({"date": day, "games": games}, f)
+            print(f"Tonight: {len(games)} games")
+        except Exception as e:
+            print(f"Couldn't load tonight's games: {e}")
         with open(os.path.join(out_dir, "latest.json"), "w") as f:
             json.dump({"file": fname, "season": SEASON, "rows": len(all_rows),
-                       "updated": datetime.datetime.utcnow().isoformat() + "Z"}, f)
+                       "updated": datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + "Z"}, f)
 
     pts = [r["PTS"] for r in all_rows if CHECK_PLAYER.lower() in r["PLAYER_NAME"].lower()]
     if pts:
