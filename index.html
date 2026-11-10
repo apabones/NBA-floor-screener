@@ -631,7 +631,10 @@ function renderPrices(){
     $("summary").textContent = `Player board: every priced prop for "${$("search").value.trim()}", best gap first. Range and gap filters are off while searching.`;
   } else {
     rows = rows.filter(r => r.mkt >= lo && r.mkt <= hi && r.gap >= mg && r.n >= minG);
-    $("summary").textContent = `${rows.length} price gaps: hit rate at least ${Math.round(mg * 100)} points above a ${Math.round(lo * 100)} to ${Math.round(hi * 100)}% price. Prices as of ${new Date(PROPS.updated).toLocaleString()}.`;
+    const best = {};   /* one line per player and stat: the threshold with the biggest gap */
+    rows.forEach(r => { const k = r.p.id + "|" + r.g.stat; if(!best[k] || r.gap > best[k].gap) best[k] = r; });
+    rows = Object.values(best);
+    $("summary").textContent = `${rows.length} player props with gaps (best line each): hit rate at least ${Math.round(mg * 100)} points above a ${Math.round(lo * 100)} to ${Math.round(hi * 100)}% price. Prices as of ${new Date(PROPS.updated).toLocaleString()}.`;
   }
   rows.sort((a, b) => b.gap - a.gap);
   const pc = x => Math.round(x * 100) + "%";
@@ -731,10 +734,16 @@ loadPrefs();
 syncViews();
 (async () => {
   try{
-    const meta = await (await fetch("data/latest.json", {cache: "no-store"})).json();
-    const text = await (await fetch("data/" + meta.file, {cache: "no-store"})).text();
-    try{ TODAY = await (await fetch("data/today.json", {cache: "no-store"})).json(); }catch(e){ TODAY = null; }
-    try{ PROPS = await (await fetch("data/props.json", {cache: "no-store"})).json(); }catch(e){ PROPS = null; }
+    /* read straight from the repo so a slow GitHub Pages rebuild never serves stale data or misses new files */
+    const gh = location.hostname.match(/^([^.]+)\.github\.io$/), repo = location.pathname.split("/").filter(Boolean)[0];
+    const base = gh && repo ? `https://raw.githubusercontent.com/${gh[1]}/${repo}/main/data/` : "data/";
+    const get = async (f, json) => { let r = await fetch(base + f + (base === "data/" ? "" : "?t=" + Date.now()), {cache: "no-store"});
+      if(!r.ok && base !== "data/") r = await fetch("data/" + f, {cache: "no-store"});
+      if(!r.ok) throw new Error(f); return json ? r.json() : r.text(); };
+    const meta = await get("latest.json", true);
+    const text = await get(meta.file, false);
+    try{ TODAY = await get("today.json", true); }catch(e){ TODAY = null; }
+    try{ PROPS = await get("props.json", true); }catch(e){ PROPS = null; }
     useText(meta.file, text);
     if(meta.updated) $("season").textContent += " · updated " + new Date(meta.updated).toLocaleDateString();
     return;
