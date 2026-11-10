@@ -123,6 +123,7 @@ svg.ring{display:block;width:190px;height:190px;margin:6px auto 0}
     <button data-view="ring" aria-pressed="false">Ring</button>
     <button data-view="scan" aria-pressed="false">Scan</button>
     <button data-view="custom" aria-pressed="false">Custom</button>
+    <button data-view="prices" aria-pressed="false">Prices</button>
   </div>
   <div class="cbox" id="custombar" hidden>
     <label>Stat <select id="cStat"><option>PRA</option><option>PTS</option><option>REB</option><option>AST</option><option value="FG3M">Threes made</option><option value="FG3A">3PA</option><option>PR</option><option>PA</option><option>RA</option></select></label>
@@ -132,6 +133,12 @@ svg.ring{display:block;width:190px;height:190px;margin:6px auto 0}
     <label>Min 3PA <input id="c3pa" inputmode="decimal" placeholder="any"></label>
     <label>Min games <input id="cGames" inputmode="numeric" placeholder="4"></label>
     <label>Team role <select id="cRole"><option value="any">Any</option><option value="2-5">2nd to 5th scorer</option><option value="3-6">3rd to 6th scorer</option></select></label>
+  </div>
+  <div class="cbox" id="pricebar" hidden>
+    <label>Price from % <input id="pLo" inputmode="numeric" placeholder="20"></label>
+    <label>to % <input id="pHi" inputmode="numeric" placeholder="80"></label>
+    <label>Min gap (pts) <input id="pGap" inputmode="numeric" placeholder="10"></label>
+    <label>Min games <input id="pGames" inputmode="numeric" placeholder="5"></label>
   </div>
   <div class="bar" id="scanbar" hidden>
     <select id="scanMode" aria-label="Scan mode" style="flex:1">
@@ -215,7 +222,7 @@ async function loadSaved(){
 }
 function savePrefs(){
   try{
-    const p = {}; ["stat","line","minMin","maxMin","minTot","projMin","minGames","maxDuds","sort","search","scanMode","cStat","cMin","cMax","cDuds","c3pa","cGames","cRole"].forEach(k => p[k] = $(k).value);
+    const p = {}; ["stat","line","minMin","maxMin","minTot","projMin","minGames","maxDuds","sort","search","scanMode","cStat","cMin","cMax","cDuds","c3pa","cGames","cRole","pLo","pHi","pGap","pGames"].forEach(k => p[k] = $(k).value);
     p.dropShort = $("dropShort").checked;
     p.view = view;
     p.teams = [...teams];
@@ -225,7 +232,7 @@ function savePrefs(){
 function loadPrefs(){
   try{
     const p = JSON.parse(localStorage.getItem("nbafloor-prefs") || "null"); if(!p) return;
-    ["stat","line","minMin","maxMin","minTot","projMin","minGames","maxDuds","sort","search","scanMode","cStat","cMin","cMax","cDuds","c3pa","cGames","cRole"].forEach(k => { if(p[k] !== undefined && $(k)) $(k).value = p[k]; });
+    ["stat","line","minMin","maxMin","minTot","projMin","minGames","maxDuds","sort","search","scanMode","cStat","cMin","cMax","cDuds","c3pa","cGames","cRole","pLo","pHi","pGap","pGames"].forEach(k => { if(p[k] !== undefined && $(k)) $(k).value = p[k]; });
     if(p.dropShort !== undefined) $("dropShort").checked = p.dropShort;
     if(p.view) view = p.view;
     if(Array.isArray(p.teams)) teams = new Set(p.teams);
@@ -583,7 +590,62 @@ function renderCustom(){
   $("more").hidden = res.length <= shown;
 }
 
+/* ---------- prices: hit rate vs. market at the same threshold ---------- */
+let PROPS = null;
+const STAT_NAME = {PTS: "Points", REB: "Rebounds", AST: "Assists", FG3M: "Threes", FG3A: "3PA", PRA: "PRA", PR: "Pts+Reb", PA: "Pts+Ast", RA: "Reb+Ast"};
+const pnorm = s => String(s).toLowerCase().replace(/[’'.]/g, "").replace(/\b(jr|sr|ii|iii|iv|v)\b/g, "").replace(/[^a-z]/g, "");
+const pkey = s => { const w = String(s).toLowerCase().replace(/[’'.]/g, "").replace(/\b(jr|sr|ii|iii|iv|v)\b/g, "").replace(/[^a-z ]/g, "").split(" ").filter(Boolean); return w.length > 1 ? w[w.length - 1] + "|" + w[0][0] : pnorm(s); };
+function matchPlayer(name){
+  const n = pnorm(name), exact = players.find(p => pnorm(p.name) === n);
+  if(exact) return exact;
+  const k = pkey(name), hits = players.filter(p => pkey(p.name) === k);
+  return hits.length === 1 ? hits[0] : null;
+}
+function priceRows(){
+  if(!PROPS) return [];
+  const drop = $("dropShort").checked, groups = {};
+  for(const r of PROPS.props){
+    const k = r.player + "|" + r.stat + "|" + r.at_least;
+    (groups[k] = groups[k] || {player: r.player, stat: r.stat, at: r.at_least, game: r.game, books: {}}).books[r.book] = r;
+  }
+  const out = [];
+  for(const g of Object.values(groups)){
+    const p = matchPlayer(g.player); if(!p) continue;
+    const games = drop ? p.games.filter(x => x.min >= 0.6 * p.usualMin) : p.games;
+    if(!games.length) continue;
+    const v = games.map(x => x[g.stat]), hits = v.filter(x => x >= g.at).length, avg = mean(v), srt = [...v].sort((a, b) => a - b);
+    const nv = g.books.novig, dk = g.books.draftkings, fd = g.books.fanduel;
+    const mkt = nv ? (nv.fair ?? nv.prob) : dk ? dk.prob : fd ? fd.prob : null; if(mkt == null) continue;
+    out.push({p, g, n: v.length, hits, rate: hits / v.length, mkt, gap: hits / v.length - mkt, floor: quant(srt, 0.1), duds: v.filter(x => x < avg / 2).length, nv, dk, fd, last: v.slice(-6)});
+  }
+  return out;
+}
+function renderPrices(){
+  savePrefs();
+  const term = $("search").value.trim().toLowerCase();
+  if(!PROPS){ $("summary").textContent = "Prices load from the daily data on GitHub once the PropLine key is added. They don't show in the preview link."; $("list").innerHTML = ""; $("more").hidden = true; return; }
+  let rows = priceRows();
+  const lo = (parseFloat($("pLo").value) || 20) / 100, hi = (parseFloat($("pHi").value) || 80) / 100, mg = (parseFloat($("pGap").value) || 10) / 100, minG = parseInt($("pGames").value) || 5;
+  if(term){
+    rows = rows.filter(r => r.p.name.toLowerCase().includes(term));
+    $("summary").textContent = `Player board: every priced prop for "${$("search").value.trim()}", best gap first. Range and gap filters are off while searching.`;
+  } else {
+    rows = rows.filter(r => r.mkt >= lo && r.mkt <= hi && r.gap >= mg && r.n >= minG);
+    $("summary").textContent = `${rows.length} price gaps: hit rate at least ${Math.round(mg * 100)} points above a ${Math.round(lo * 100)} to ${Math.round(hi * 100)}% price. Prices as of ${new Date(PROPS.updated).toLocaleString()}.`;
+  }
+  rows.sort((a, b) => b.gap - a.gap);
+  const pc = x => Math.round(x * 100) + "%";
+  const book = (lab, r) => r ? `${lab} ${pc(r.fair ?? r.prob)}${r.liquidity != null ? ` ($${Math.round(r.liquidity)})` : ""}` : "";
+  $("list").innerHTML = rows.slice(0, shown).map((r, i) => `<div class="row"><div class="name">${i + 1}. ${r.p.name}, ${r.p.team} · ${STAT_NAME[r.g.stat]} ${r.g.at}+</div>
+    <div class="cline"><b>${r.hits} of ${r.n} (${pc(r.rate)})</b> vs market ${pc(r.mkt)} · <b style="color:${r.gap >= 0.1 ? "var(--hit)" : r.gap <= -0.1 ? "var(--miss)" : "inherit"}">gap ${r.gap >= 0 ? "+" : ""}${Math.round(r.gap * 100)}</b></div>
+    <div class="cline">${[book("Novig", r.nv), book("DK", r.dk), book("FD", r.fd)].filter(Boolean).join(" · ")}${r.nv && r.nv.liquidity != null && r.nv.liquidity < 25 ? ` <span class="tag eff">thin Novig market</span>` : ""}</div>
+    <div class="cline" style="color:var(--muted)">Floor ${fmt(r.floor)} · duds ${r.duds} · last ${r.last.length}: ${r.last.map(x => fmt(x)).join(", ")} · ${r.g.game}</div></div>`).join("") ||
+    `<div class="empty"><h2>No ${term ? "priced props for that name" : "gaps in range"}</h2><p>${term ? "Prices only exist for players in tonight's games." : "Widen the price range or lower the minimum gap."}</p></div>`;
+  $("more").hidden = rows.length <= shown;
+}
+
 function render(){
+  if(view === "prices") return renderPrices();
   if(view === "custom") return renderCustom();
   if(view === "scan") return renderScan();
   savePrefs();
@@ -644,10 +706,10 @@ $("toggle").onclick = () => {
   const open = $("filters").classList.toggle("open");
   $("toggle").setAttribute("aria-expanded", open);
 };
-["stat","line","minMin","maxMin","minTot","projMin","minGames","maxDuds","sort","search","dropShort","scanMode","cStat","cMin","cMax","cDuds","c3pa","cGames","cRole"].forEach(id =>
+["stat","line","minMin","maxMin","minTot","projMin","minGames","maxDuds","sort","search","dropShort","scanMode","cStat","cMin","cMax","cDuds","c3pa","cGames","cRole","pLo","pHi","pGap","pGames"].forEach(id =>
   $(id).addEventListener("input", () => { shown = 60; render(); }));
 $("more").onclick = () => { shown += 60; render(); };
-function syncViews(){ document.querySelectorAll(".views button").forEach(b => b.setAttribute("aria-pressed", b.dataset.view === view)); $("scanbar").hidden = view !== "scan"; $("custombar").hidden = view !== "custom"; $("stat").disabled = $("line").disabled = view === "scan" || view === "custom"; }
+function syncViews(){ document.querySelectorAll(".views button").forEach(b => b.setAttribute("aria-pressed", b.dataset.view === view)); $("scanbar").hidden = view !== "scan"; $("custombar").hidden = view !== "custom"; $("pricebar").hidden = view !== "prices"; $("stat").disabled = $("line").disabled = view === "scan" || view === "custom" || view === "prices"; }
 function renderTeams(){
   const all = [...new Set(players.map(p => p.team).filter(Boolean))].sort();
   for(const t of [...teams]) if(!all.includes(t)) teams.delete(t);
@@ -672,6 +734,7 @@ syncViews();
     const meta = await (await fetch("data/latest.json", {cache: "no-store"})).json();
     const text = await (await fetch("data/" + meta.file, {cache: "no-store"})).text();
     try{ TODAY = await (await fetch("data/today.json", {cache: "no-store"})).json(); }catch(e){ TODAY = null; }
+    try{ PROPS = await (await fetch("data/props.json", {cache: "no-store"})).json(); }catch(e){ PROPS = null; }
     useText(meta.file, text);
     if(meta.updated) $("season").textContent += " · updated " + new Date(meta.updated).toLocaleDateString();
     return;

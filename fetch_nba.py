@@ -13,6 +13,7 @@ data/latest.json for the hosted screener. On your phone it saves to Downloads.
 """
 
 import csv
+import re
 import datetime
 import json
 import os
@@ -98,6 +99,70 @@ def local_date(iso):
         return (t - datetime.timedelta(hours=6)).date().isoformat()
     except Exception:
         return iso[:10]
+
+
+PROP_MARKETS = {"player_points": "PTS", "player_rebounds": "REB", "player_assists": "AST", "player_threes": "FG3M",
+                "player_threes_attempted": "FG3A", "player_points_rebounds_assists": "PRA", "player_points_rebounds": "PR",
+                "player_points_assists": "PA", "player_rebounds_assists": "RA"}
+
+
+def implied(a):
+    a = float(a)
+    return 100 / (a + 100) if a > 0 else -a / (-a + 100)
+
+
+def fetch_props(out_dir):
+    """Tonight's player prop prices from PropLine (Novig, DraftKings, FanDuel). Needs the PROPLINE_KEY secret."""
+    key = os.environ.get("PROPLINE_KEY")
+    if not key:
+        return 0
+    from propline import PropLine
+    client = PropLine(key)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    evs = client.get_events("basketball_nba")
+    evs = evs.get("data", evs) if isinstance(evs, dict) else evs
+    rows = []
+    for e in evs or []:
+        try:
+            t = datetime.datetime.fromisoformat(str(e.get("commence_time")).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if not (now - datetime.timedelta(hours=2) <= t <= now + datetime.timedelta(hours=30)):
+            continue
+        odds = client.get_odds("basketball_nba", event_id=e["id"], markets=list(PROP_MARKETS), bookmakers=["novig", "draftkings", "fanduel"])
+        games = odds.get("data", odds) if isinstance(odds, dict) else odds
+        for g in (games if isinstance(games, list) else [games]):
+            for b in g.get("bookmakers", []):
+                for m in b.get("markets", []):
+                    stat = PROP_MARKETS.get(m.get("key"))
+                    if not stat:
+                        continue
+                    outs = m.get("outcomes", [])
+                    for o in outs:
+                        price, player, name = o.get("price"), o.get("description") or "", str(o.get("name", ""))
+                        if price is None or not player:
+                            continue
+                        if name in ("Over", "Under"):
+                            if o.get("point") is None:
+                                continue
+                            at_least = int(float(o["point"]) + 0.5)          # over 2.5 = 3 or more
+                            if name == "Under":
+                                continue
+                            under = next((u for u in outs if u.get("name") == "Under" and u.get("description") == player
+                                          and u.get("point") == o.get("point")), None)
+                            p = implied(price)
+                            fair = p / (p + implied(under["price"])) if under and under.get("price") is not None else None
+                        else:
+                            mt = re.match(r"\s*(\d+)\+", name)             # DraftKings ladders like '25+ Points'
+                            if not mt:
+                                continue
+                            at_least, p, fair = int(mt.group(1)), implied(price), None
+                        rows.append({"player": player, "stat": stat, "at_least": at_least, "book": b.get("key"),
+                                     "price": price, "prob": round(p, 3), "fair": None if fair is None else round(fair, 3),
+                                     "liquidity": o.get("liquidity"), "game": f"{g.get('away_team', '')} at {g.get('home_team', '')}"})
+    with open(os.path.join(out_dir, "props.json"), "w") as f:
+        json.dump({"updated": now.isoformat(timespec="seconds"), "props": rows}, f, separators=(",", ":"))
+    return len(rows)
 
 
 def parse_log(pid, name, data, roster_team="", pos=""):
@@ -189,6 +254,11 @@ def main():
             print(f"Tonight: {len(games)} games")
         except Exception as e:
             print(f"Couldn't load tonight's games: {e}")
+        try:
+            n = fetch_props(out_dir)
+            print(f"Props: {n} prices saved")
+        except Exception as e:
+            print(f"Couldn't load prop prices: {e}")
         with open(os.path.join(out_dir, "latest.json"), "w") as f:
             json.dump({"file": fname, "season": SEASON, "rows": len(all_rows),
                        "updated": datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + "Z"}, f)
