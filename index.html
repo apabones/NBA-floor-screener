@@ -34,6 +34,7 @@ body{margin:0;background:var(--bg);color:var(--ink);font:400 15px/1.45 "Barlow",
 body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--surface)}
 .num,h1,.big,select,input,button{font-family:"Barlow Condensed","Arial Narrow",system-ui,sans-serif}
 header{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--surface);border-bottom:1px solid var(--rule);padding:10px 14px;max-height:calc(100vh - env(safe-area-inset-top,0px));max-height:calc(100dvh - env(safe-area-inset-top,0px));overflow-y:auto;overscroll-behavior:contain}
+[hidden]{display:none !important}   /* .cbox and .opts set their own display, which otherwise beats the hidden attribute */
 .opts{display:block;margin:8px 0 0;font:600 13px Barlow,sans-serif;background:none;border:1px solid var(--rule);border-radius:999px;padding:4px 12px;color:inherit}
 .toprow{display:flex;align-items:baseline;justify-content:space-between;gap:10px}
 h1{margin:0;font-size:24px;font-weight:700;letter-spacing:.01em}
