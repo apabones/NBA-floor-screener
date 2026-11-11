@@ -33,7 +33,8 @@ html{scroll-padding-top:env(safe-area-inset-top,0px)}
 body{margin:0;background:var(--bg);color:var(--ink);font:400 15px/1.45 "Barlow",system-ui,sans-serif}
 body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--surface)}
 .num,h1,.big,select,input,button{font-family:"Barlow Condensed","Arial Narrow",system-ui,sans-serif}
-header{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--surface);border-bottom:1px solid var(--rule);padding:10px 14px}
+header{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--surface);border-bottom:1px solid var(--rule);padding:10px 14px;max-height:calc(100vh - env(safe-area-inset-top,0px));max-height:calc(100dvh - env(safe-area-inset-top,0px));overflow-y:auto;overscroll-behavior:contain}
+.opts{display:block;margin:8px 0 0;font:600 13px Barlow,sans-serif;background:none;border:1px solid var(--rule);border-radius:999px;padding:4px 12px;color:inherit}
 .toprow{display:flex;align-items:baseline;justify-content:space-between;gap:10px}
 h1{margin:0;font-size:24px;font-weight:700;letter-spacing:.01em}
 .season{color:var(--muted);font-size:14px}
@@ -125,6 +126,7 @@ svg.ring{display:block;width:190px;height:190px;margin:6px auto 0}
     <button data-view="custom" aria-pressed="false">Custom</button>
     <button data-view="prices" aria-pressed="false">Prices</button>
   </div>
+  <button class="opts" id="optsToggle" type="button" aria-expanded="true" hidden>Hide options</button>
   <div class="cbox" id="custombar" hidden>
     <label>Stat <select id="cStat"><option>PRA</option><option>PTS</option><option>REB</option><option>AST</option><option value="FG3M">Threes made</option><option value="FG3A">3PA</option><option>PR</option><option>PA</option><option>RA</option></select></label>
     <label>Avg from <input id="cMin" inputmode="decimal" placeholder="15"></label>
@@ -193,6 +195,7 @@ svg.ring{display:block;width:190px;height:190px;margin:6px auto 0}
 </main>
 
 <script>
+var optsOpen = true;   /* Custom / Prices option boxes */
 (function(){
 const $ = id => document.getElementById(id);
 let players = [], shown = 60, view = "dots", early = "", teams = new Set();
@@ -611,6 +614,7 @@ function priceRows(){
   const out = [];
   for(const g of Object.values(groups)){
     const p = matchPlayer(g.player); if(!p) continue;
+    if(teams.size && !teams.has(p.team)) continue;   /* respect the team picker, like the other tabs */
     const games = drop ? p.games.filter(x => x.min >= 0.6 * p.usualMin) : p.games;
     if(!games.length) continue;
     const v = games.map(x => x[g.stat]), hits = v.filter(x => x >= g.at).length, avg = mean(v), srt = [...v].sort((a, b) => a - b);
@@ -705,6 +709,7 @@ document.querySelectorAll(".fileinput").forEach(inp => inp.onchange = e => {
   rd.readAsText(f);
   e.target.value = "";
 });
+$("optsToggle").onclick = () => { optsOpen = !optsOpen; syncViews(); };
 $("toggle").onclick = () => {
   const open = $("filters").classList.toggle("open");
   $("toggle").setAttribute("aria-expanded", open);
@@ -712,7 +717,7 @@ $("toggle").onclick = () => {
 ["stat","line","minMin","maxMin","minTot","projMin","minGames","maxDuds","sort","search","dropShort","scanMode","cStat","cMin","cMax","cDuds","c3pa","cGames","cRole","pLo","pHi","pGap","pGames"].forEach(id =>
   $(id).addEventListener("input", () => { shown = 60; render(); }));
 $("more").onclick = () => { shown += 60; render(); };
-function syncViews(){ document.querySelectorAll(".views button").forEach(b => b.setAttribute("aria-pressed", b.dataset.view === view)); $("scanbar").hidden = view !== "scan"; $("custombar").hidden = view !== "custom"; $("pricebar").hidden = view !== "prices"; $("stat").disabled = $("line").disabled = view === "scan" || view === "custom" || view === "prices"; }
+function syncViews(){ document.querySelectorAll(".views button").forEach(b => b.setAttribute("aria-pressed", b.dataset.view === view)); $("scanbar").hidden = view !== "scan"; $("optsToggle").hidden = view !== "custom" && view !== "prices"; $("optsToggle").textContent = optsOpen ? "Hide options" : "Show options"; $("optsToggle").setAttribute("aria-expanded", optsOpen); $("custombar").hidden = view !== "custom" || !optsOpen; $("pricebar").hidden = view !== "prices" || !optsOpen; $("stat").disabled = $("line").disabled = view === "scan" || view === "custom" || view === "prices"; }
 function renderTeams(){
   const all = [...new Set(players.map(p => p.team).filter(Boolean))].sort();
   for(const t of [...teams]) if(!all.includes(t)) teams.delete(t);
