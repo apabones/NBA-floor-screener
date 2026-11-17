@@ -276,7 +276,8 @@ function build(rows){
     p.games = p.games.filter(g => g.min > 0);   /* did-not-play rows are not games */
     if(!p.games.length) return null;
     p.avgMin = p.games.reduce((s,g) => s + g.min, 0) / p.games.length;
-    const ms = p.games.map(g => g.min).sort((a, b) => a - b), mid = Math.floor(ms.length / 2);
+    /* usual minutes = median of his last 10 games, so a demotion or promotion resets what counts as a short game */
+    const ms = p.games.slice(-10).map(g => g.min).sort((a, b) => a - b), mid = Math.floor(ms.length / 2);
     p.usualMin = ms.length % 2 ? ms[mid] : (ms[mid - 1] + ms[mid]) / 2;
     return p;
   }).filter(Boolean);
@@ -597,30 +598,46 @@ function renderCustom(){
 /* ---------- prices: hit rate vs. market at the same threshold ---------- */
 let PROPS = null;
 const STAT_NAME = {PTS: "Points", REB: "Rebounds", AST: "Assists", FG3M: "Threes", FG3A: "3PA", PRA: "PRA", PR: "Pts+Reb", PA: "Pts+Ast", RA: "Reb+Ast"};
-const pnorm = s => String(s).toLowerCase().replace(/[’'.]/g, "").replace(/\b(jr|sr|ii|iii|iv|v)\b/g, "").replace(/[^a-z]/g, "");
-const pkey = s => { const w = String(s).toLowerCase().replace(/[’'.]/g, "").replace(/\b(jr|sr|ii|iii|iv|v)\b/g, "").replace(/[^a-z ]/g, "").split(" ").filter(Boolean); return w.length > 1 ? w[w.length - 1] + "|" + w[0][0] : pnorm(s); };
+/* accents become plain letters (Diabaté = Diabate), suffixes and punctuation drop out */
+const nwords = s => String(s).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[’'.]/g, "")
+  .replace(/\b(jr|sr|ii|iii|iv|v)\b/g, "").replace(/[^a-z ]/g, "").split(" ").filter(Boolean);
+const pnorm = s => nwords(s).join("");
+let matchCache = new Map();
 function matchPlayer(name){
-  const n = pnorm(name), exact = players.find(p => pnorm(p.name) === n);
-  if(exact) return exact;
-  const k = pkey(name), hits = players.filter(p => pkey(p.name) === k);
-  return hits.length === 1 ? hits[0] : null;
+  if(matchCache.has(name)) return matchCache.get(name);
+  const n = pnorm(name);
+  let hit = players.find(p => pnorm(p.name) === n) || null;
+  if(!hit){
+    /* fallback: same last name and first names that fit (Nic / Nicolas), never just a shared initial (Kris / Keegan) */
+    const w = nwords(name);
+    if(w.length > 1){
+      const first = w[0], last = w[w.length - 1];
+      const hits = players.filter(p => { const v = nwords(p.name); return v.length > 1 && v[v.length - 1] === last && (v[0].startsWith(first) || first.startsWith(v[0])); });
+      if(hits.length === 1) hit = hits[0];
+    }
+  }
+  matchCache.set(name, hit);
+  return hit;
 }
 function priceRows(){
   if(!PROPS) return [];
-  const drop = $("dropShort").checked, groups = {};
+  const groups = {};
   for(const r of PROPS.props){
-    const k = r.player + "|" + r.stat + "|" + r.at_least;
-    (groups[k] = groups[k] || {player: r.player, stat: r.stat, at: r.at_least, game: r.game, books: {}}).books[r.book] = r;
+    const k = pnorm(r.player) + "|" + r.stat + "|" + r.at_least;   /* books spell names differently (Diabate / Diabaté) */
+    const b = (groups[k] = groups[k] || {player: r.player, stat: r.stat, at: r.at_least, game: r.game, books: {}}).books;
+    if(!b[r.book] || r.fair != null) b[r.book] = r;   /* a DK over/under beats the same DK ladder rung, since it has a no-vig price */
   }
   const out = [];
   for(const g of Object.values(groups)){
     const p = matchPlayer(g.player); if(!p) continue;
     if(teams.size && !teams.has(p.team)) continue;   /* respect the team picker, like the other tabs */
-    const games = drop ? p.games.filter(x => x.min >= 0.6 * p.usualMin) : p.games;
+    /* every game counts here: the market prices in early exits and blowouts, so the hit rate has to as well */
+    const games = p.games;
     if(!games.length) continue;
     const v = games.map(x => x[g.stat]), hits = v.filter(x => x >= g.at).length, avg = mean(v), srt = [...v].sort((a, b) => a - b);
     const nv = g.books.novig, dk = g.books.draftkings, fd = g.books.fanduel;
-    const mkt = nv ? (nv.fair ?? nv.prob) : dk ? dk.prob : fd ? fd.prob : null; if(mkt == null) continue;
+    const fair = r => r.fair ?? r.prob;   /* no-vig when both sides are known, for every book */
+    const mkt = nv ? fair(nv) : dk ? fair(dk) : fd ? fair(fd) : null; if(mkt == null) continue;
     out.push({p, g, n: v.length, hits, rate: hits / v.length, mkt, gap: hits / v.length - mkt, floor: quant(srt, 0.1), duds: v.filter(x => x < avg / 2).length, nv, dk, fd, last: v.slice(-6)});
   }
   return out;
@@ -639,7 +656,7 @@ function renderPrices(){
     const best = {};   /* one line per player and stat: the threshold with the biggest gap */
     rows.forEach(r => { const k = r.p.id + "|" + r.g.stat; if(!best[k] || r.gap > best[k].gap) best[k] = r; });
     rows = Object.values(best);
-    $("summary").textContent = `${rows.length} player props with gaps (best line each): hit rate at least ${Math.round(mg * 100)} points above a ${Math.round(lo * 100)} to ${Math.round(hi * 100)}% price. Prices as of ${new Date(PROPS.updated).toLocaleString()}.`;
+    $("summary").textContent = `${rows.length} player props with gaps (best line each): hit rate at least ${Math.round(mg * 100)} points above a ${Math.round(lo * 100)} to ${Math.round(hi * 100)}% price. Prices as of ${new Date(PROPS.updated).toLocaleString()}. Hit rates count every game, short ones included.`;
   }
   rows.sort((a, b) => b.gap - a.gap);
   const pc = x => Math.round(x * 100) + "%";
@@ -690,6 +707,7 @@ function useText(name, text){
   const rows = parseCSV(text);
   if(!rows.length || !("PTS" in rows[0])){ alert("That file doesn’t look like the game log CSV. Pick an nba_gamelogs file."); return; }
   players = build(rows);
+  matchCache = new Map();
   const maxG = players.reduce((m, p) => Math.max(m, p.games.length), 0);
   early = "";
   if(maxG < (parseInt($("minGames").value) || 1)){
